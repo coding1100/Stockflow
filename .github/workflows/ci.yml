@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: stockflow
+          POSTGRES_PASSWORD: stockflow
+          POSTGRES_DB: stockflow
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U stockflow" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://stockflow:stockflow@localhost:5432/stockflow?schema=public
+      REDIS_URL: redis://localhost:6379
+      NEXTAUTH_SECRET: ci-secret-please-change-32-characters
+      NEXTAUTH_URL: http://localhost:3000
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9.15.4 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile=false
+      - run: pnpm --filter @stockflow/db generate
+      - run: pnpm --filter @stockflow/db migrate:deploy
+      - run: pnpm typecheck
+      - run: pnpm --filter @stockflow/core test   # incl. routing <1s/200-stop perf gate
+      - run: pnpm --filter @stockflow/web build

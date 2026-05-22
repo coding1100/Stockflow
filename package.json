@@ -1,0 +1,25 @@
+{
+  "name": "stockflow",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "e2e": "turbo run e2e",
+    "db:migrate": "pnpm --filter @stockflow/db migrate:deploy",
+    "db:seed": "pnpm --filter @stockflow/db seed",
+    "demo:up": "node scripts/demo-up.mjs"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2"
+  }
+}

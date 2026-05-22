@@ -1,0 +1,13 @@
+# Worker: materializer + BullMQ jobs (runs via tsx, no build step).
+# Debian slim + openssl so the Prisma query engine works out of the box.
+FROM node:22-slim
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN corepack enable
+WORKDIR /app
+
+COPY . .
+RUN pnpm install --frozen-lockfile=false
+RUN pnpm --filter @stockflow/db generate
+
+ENV NODE_ENV=production
+CMD ["pnpm", "--filter", "@stockflow/worker", "start"]

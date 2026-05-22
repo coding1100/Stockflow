@@ -1,0 +1,38 @@
+{
+  "name": "@stockflow/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tenancy": "./src/tenancy.ts"
+  },
+  "scripts": {
+    "generate": "prisma generate",
+    "migrate:dev": "prisma migrate dev",
+    "migrate:deploy": "prisma migrate deploy",
+    "migrate:create": "prisma migrate dev --create-only",
+    "studio": "prisma studio",
+    "seed": "tsx prisma/seed.ts",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.1.0",
+    "@stockflow/config": "workspace:*"
+  },
+  "devDependencies": {
+    "@faker-js/faker": "^9.3.0",
+    "@stockflow/core": "workspace:*",
+    "@stockflow/events": "workspace:*",
+    "@types/node": "^22.10.2",
+    "prisma": "^6.1.0",
+    "seedrandom": "^3.0.5",
+    "@types/seedrandom": "^3.0.8",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

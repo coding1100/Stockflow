@@ -1,0 +1,12 @@
+{
+  "name": "StockFlow",
+  "short_name": "StockFlow",
+  "description": "Warehouse operations — inventory and picking",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#2563eb",
+  "icons": [
+    { "src": "/demo-assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

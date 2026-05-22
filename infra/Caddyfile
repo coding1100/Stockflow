@@ -1,0 +1,7 @@
+# Optional bundled reverse proxy with automatic HTTPS (Let's Encrypt).
+# Used only with `--profile tls`. Set DOMAIN in infra/.env.deploy and point its
+# DNS A record at this server. Caddy handles the cert + http->https redirect.
+# SSE works out of the box (Caddy does not buffer proxied responses).
+{$DOMAIN} {
+	reverse_proxy web:3000
+}

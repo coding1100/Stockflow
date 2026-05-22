@@ -1,0 +1,20 @@
+# Keep the build context small and clean. Never copy host node_modules/.next into the
+# image (platform-specific binaries + the Windows pnpm hardlink issues). The image does a
+# fresh `pnpm install` and `next build` from source.
+**/node_modules
+**/.next
+**/dist
+**/.turbo
+**/coverage
+.git
+.github
+**/.env
+**/.env.*
+!**/.env.example
+*.log
+prd.txt
+stockflow-prd-full.docx
+docs
+playwright-report
+test-results
+**/.playwright-mcp

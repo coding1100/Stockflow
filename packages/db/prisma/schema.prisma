@@ -1,0 +1,490 @@
+// StockFlow data model — see docs/PRD §6.2.
+// Conventions: uuid PKs, timestamptz, JSONB for flexible/vendor-shaped data,
+// camelCase Prisma fields mapped to snake_case columns.
+//
+// TENANCY: every operational table carries tenantId + warehouseId. For the demo we
+// enforce scoping in the application layer (tRPC context + Prisma client extension in
+// src/tenancy.ts). Postgres row-level-security policies are the documented production
+// path (see prisma/migrations/*_rls). Single-tenant seed uses fixed constants.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy / org
+// ---------------------------------------------------------------------------
+
+model Tenant {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  warehouses Warehouse[]
+
+  @@map("tenants")
+}
+
+model Warehouse {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  code      String
+  name      String
+  // Pack station / depot coordinates on the warehouse map (route anchor).
+  depotX    Int      @default(0) @map("depot_x")
+  depotY    Int      @default(0) @map("depot_y")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, code])
+  @@map("warehouses")
+}
+
+// ---------------------------------------------------------------------------
+// Auth / RBAC
+// ---------------------------------------------------------------------------
+
+enum Role {
+  OPERATIONS_LEAD
+  RECEIVING_CLERK
+  PICKER
+  VENDOR_MANAGER
+  ADMIN
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  email        String   @unique
+  name         String
+  passwordHash String   @map("password_hash")
+  role         Role
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  wavesPicked    Wave[]
+  transactions   Transaction[]
+  cycleCounts    CycleCount[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Warehouse topology
+// ---------------------------------------------------------------------------
+
+model Zone {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  warehouseId String   @map("warehouse_id") @db.Uuid
+  code        String
+  name        String
+  // Bounding box on the map for rendering + zone-graph centroid.
+  minX        Int      @map("min_x")
+  minY        Int      @map("min_y")
+  maxX        Int      @map("max_x")
+  maxY        Int      @map("max_y")
+  // Adjacent zone codes + connector cost for the routing zone graph.
+  adjacency   Json     @default("[]") @db.JsonB
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  bins Bin[]
+
+  @@unique([tenantId, code])
+  @@map("zones")
+}
+
+model Bin {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @map("tenant_id") @db.Uuid
+  warehouseId   String   @map("warehouse_id") @db.Uuid
+  zoneId        String   @map("zone_id") @db.Uuid
+  code          String // e.g. A-12-03 (zone-aisle-shelf)
+  capacityUnits Int      @map("capacity_units")
+  currentUnits  Int      @default(0) @map("current_units")
+  restrictions  Json     @default("{}") @db.JsonB
+  x             Int
+  y             Int
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  zone           Zone               @relation(fields: [zoneId], references: [id])
+  primaryForSkus Sku[]              @relation("PrimaryBin")
+  inventory      InventoryCurrent[]
+
+  @@unique([tenantId, code])
+  @@index([zoneId])
+  @@map("bins")
+}
+
+// ---------------------------------------------------------------------------
+// Catalog
+// ---------------------------------------------------------------------------
+
+enum VelocityTier {
+  A
+  B
+  C
+}
+
+model Sku {
+  id            String        @id @default(uuid()) @db.Uuid
+  tenantId      String        @map("tenant_id") @db.Uuid
+  code          String
+  name          String
+  description   String?
+  category      String
+  brand         String
+  barcode       String // scannable value used by receiving/picking
+  weightG       Int           @map("weight_g")
+  dimensionsMm  Json          @default("{}") @db.JsonB // {length,width,height}
+  hazmat        Boolean       @default(false)
+  minStock      Int           @default(0) @map("min_stock")
+  maxStock      Int           @default(0) @map("max_stock")
+  velocityTier  VelocityTier? @map("velocity_tier")
+  channelRules  Json          @default("{}") @db.JsonB
+  vendorSkus    Json          @default("[]") @db.JsonB
+  primaryBinId  String?       @map("primary_bin_id") @db.Uuid
+  imageUrl      String?       @map("image_url")
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  primaryBin   Bin?                    @relation("PrimaryBin", fields: [primaryBinId], references: [id])
+  inventory    InventoryCurrent[]
+  transactions Transaction[]
+  allocations  ChannelAllocation[]
+  velocity     VelocityClassification?
+
+  @@unique([tenantId, code])
+  @@unique([tenantId, barcode])
+  @@index([tenantId, category])
+  @@map("skus")
+}
+
+// ---------------------------------------------------------------------------
+// Vendors / ASN (seeded only for FK integrity — modules not built in this demo)
+// ---------------------------------------------------------------------------
+
+enum AdapterType {
+  EDI
+  API
+  CSV
+  EMAIL
+}
+
+enum VendorStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+model Vendor {
+  id            String       @id @default(uuid()) @db.Uuid
+  tenantId      String       @map("tenant_id") @db.Uuid
+  name          String
+  code          String
+  contact       Json         @default("{}") @db.JsonB
+  paymentTerms  String?      @map("payment_terms")
+  adapterType   AdapterType  @default(CSV) @map("adapter_type")
+  adapterConfig Json         @default("{}") @db.JsonB @map("adapter_config")
+  sla           Json         @default("{}") @db.JsonB
+  status        VendorStatus @default(ACTIVE)
+  lastSyncAt    DateTime?    @map("last_sync_at") @db.Timestamptz(6)
+  createdAt     DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  asns Asn[]
+
+  @@unique([tenantId, code])
+  @@map("vendors")
+}
+
+enum AsnStatus {
+  SCHEDULED
+  EN_ROUTE
+  IN_BAY
+  RECEIVING
+  COMPLETED
+  DISCREPANCY
+}
+
+model Asn {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  vendorId        String    @map("vendor_id") @db.Uuid
+  poNumber        String    @map("po_number")
+  expectedArrival DateTime  @map("expected_arrival") @db.Timestamptz(6)
+  dockBay         String?   @map("dock_bay")
+  lineItems       Json      @default("[]") @db.JsonB
+  status          AsnStatus @default(SCHEDULED)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  vendor Vendor @relation(fields: [vendorId], references: [id])
+
+  @@map("asns")
+}
+
+// ---------------------------------------------------------------------------
+// Event log (immutable, append-only) — the source of truth
+// ---------------------------------------------------------------------------
+
+enum TransactionType {
+  RECEIPT
+  PICK
+  COUNT
+  ADJUSTMENT
+  TRANSFER
+  RETURN
+}
+
+model Transaction {
+  id          String          @id @default(uuid()) @db.Uuid
+  tenantId    String          @map("tenant_id") @db.Uuid
+  warehouseId String          @map("warehouse_id") @db.Uuid
+  type        TransactionType
+  skuId       String          @map("sku_id") @db.Uuid
+  binId       String?         @map("bin_id") @db.Uuid
+  quantity    Int // signed: positive = in, negative = out
+  sourceId    String?         @map("source_id") @db.Uuid
+  sourceType  String?         @map("source_type")
+  userId      String?         @map("user_id") @db.Uuid
+  // metadata holds scanId (idempotency), reason codes, photos, scanner id, etc.
+  metadata    Json            @default("{}") @db.JsonB
+  occurredAt  DateTime        @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  recordedAt  DateTime        @default(now()) @map("recorded_at") @db.Timestamptz(6)
+
+  sku  Sku   @relation(fields: [skuId], references: [id])
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([skuId, occurredAt])
+  @@index([binId, occurredAt])
+  @@index([sourceType, sourceId])
+  @@map("transactions")
+}
+
+// ---------------------------------------------------------------------------
+// Orders / waves (Picking)
+// ---------------------------------------------------------------------------
+
+enum Channel {
+  STORE
+  ECOM
+  MARKETPLACE
+  WHOLESALE
+}
+
+enum OrderStatus {
+  PENDING
+  WAVED
+  PICKING
+  PICKED
+  PACKED
+  SHIPPED
+  CANCELLED
+}
+
+model Order {
+  id         String      @id @default(uuid()) @db.Uuid
+  tenantId   String      @map("tenant_id") @db.Uuid
+  warehouseId String     @map("warehouse_id") @db.Uuid
+  externalId String      @map("external_id")
+  channel    Channel
+  slaDueAt   DateTime    @map("sla_due_at") @db.Timestamptz(6)
+  status     OrderStatus @default(PENDING)
+  lineItems  Json        @default("[]") @db.JsonB // [{skuId, quantity, allocatedBinId}]
+  waveId     String?     @map("wave_id") @db.Uuid
+  createdAt  DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  wave Wave? @relation(fields: [waveId], references: [id])
+
+  @@index([tenantId, status])
+  @@index([waveId])
+  @@map("orders")
+}
+
+enum WaveStatus {
+  DRAFT
+  RELEASED
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum WaveMode {
+  SINGLE
+  BATCH
+}
+
+model Wave {
+  id                   String     @id @default(uuid()) @db.Uuid
+  tenantId             String     @map("tenant_id") @db.Uuid
+  warehouseId          String     @map("warehouse_id") @db.Uuid
+  name                 String
+  status               WaveStatus @default(DRAFT)
+  mode                 WaveMode   @default(SINGLE)
+  pickerId             String?    @map("picker_id") @db.Uuid
+  orderIds             String[]   @map("order_ids") @db.Uuid
+  optimizedRoute       Json?      @map("optimized_route") @db.JsonB
+  // toteMap: { orderId: toteId } for batch picking
+  toteMap              Json       @default("{}") @db.JsonB @map("tote_map")
+  estimatedDurationSec Int?       @map("estimated_duration_sec")
+  actualDurationSec    Int?       @map("actual_duration_sec")
+  startedAt            DateTime?  @map("started_at") @db.Timestamptz(6)
+  completedAt          DateTime?  @map("completed_at") @db.Timestamptz(6)
+  createdAt            DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  picker User?   @relation(fields: [pickerId], references: [id])
+  orders Order[]
+
+  @@index([tenantId, status])
+  @@map("waves")
+}
+
+// ---------------------------------------------------------------------------
+// Read models / projections (maintained by the worker materializer)
+// ---------------------------------------------------------------------------
+
+model InventoryCurrent {
+  id                String   @id @default(uuid()) @db.Uuid
+  tenantId          String   @map("tenant_id") @db.Uuid
+  warehouseId       String   @map("warehouse_id") @db.Uuid
+  skuId             String   @map("sku_id") @db.Uuid
+  binId             String?  @map("bin_id") @db.Uuid // null row = SKU-level rollup
+  onHand            Int      @default(0) @map("on_hand")
+  allocated         Int      @default(0)
+  reserved          Int      @default(0)
+  inTransit         Int      @default(0) @map("in_transit")
+  lastTransactionId String?  @map("last_transaction_id") @db.Uuid
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  sku Sku  @relation(fields: [skuId], references: [id])
+  bin Bin? @relation(fields: [binId], references: [id])
+
+  @@unique([skuId, binId])
+  @@index([tenantId, skuId])
+  @@map("inventory_current")
+}
+
+model VelocityClassification {
+  skuId          String       @id @map("sku_id") @db.Uuid
+  tenantId       String       @map("tenant_id") @db.Uuid
+  rolling30dPick Int          @default(0) @map("rolling_30d_pick")
+  tier           VelocityTier
+  computedAt     DateTime     @default(now()) @map("computed_at") @db.Timestamptz(6)
+
+  sku Sku @relation(fields: [skuId], references: [id])
+
+  @@map("velocity_classification")
+}
+
+model ChannelAllocation {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  skuId      String   @map("sku_id") @db.Uuid
+  channel    Channel
+  reservedQty Int     @default(0) @map("reserved_qty")
+  orderId    String?  @map("order_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  sku Sku @relation(fields: [skuId], references: [id])
+
+  @@index([skuId, channel])
+  @@map("channel_allocations")
+}
+
+// ---------------------------------------------------------------------------
+// Cycle counts (Inventory)
+// ---------------------------------------------------------------------------
+
+enum CountScope {
+  ZONE
+  TIER
+}
+
+enum CountStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum CountLineStatus {
+  PENDING
+  COUNTED
+  VARIANCE_ACCEPTED
+  ESCALATED
+}
+
+model CycleCount {
+  id          String      @id @default(uuid()) @db.Uuid
+  tenantId    String      @map("tenant_id") @db.Uuid
+  warehouseId String      @map("warehouse_id") @db.Uuid
+  scope       CountScope
+  scopeValue  String      @map("scope_value") // zone code or velocity tier
+  status      CountStatus @default(PENDING)
+  assigneeId  String?     @map("assignee_id") @db.Uuid
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  completedAt DateTime?   @map("completed_at") @db.Timestamptz(6)
+
+  assignee User?            @relation(fields: [assigneeId], references: [id])
+  lines    CycleCountLine[]
+
+  @@index([tenantId, status])
+  @@map("cycle_counts")
+}
+
+model CycleCountLine {
+  id           String          @id @default(uuid()) @db.Uuid
+  cycleCountId String          @map("cycle_count_id") @db.Uuid
+  binId        String          @map("bin_id") @db.Uuid
+  skuId        String          @map("sku_id") @db.Uuid
+  expectedQty  Int             @map("expected_qty")
+  countedQty   Int?            @map("counted_qty")
+  variance     Int?
+  reasonCode   String?         @map("reason_code")
+  status       CountLineStatus @default(PENDING)
+
+  cycleCount CycleCount @relation(fields: [cycleCountId], references: [id], onDelete: Cascade)
+
+  @@index([cycleCountId])
+  @@map("cycle_count_lines")
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard KPI aggregate + audit log
+// ---------------------------------------------------------------------------
+
+model DashboardKpi {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @map("tenant_id") @db.Uuid
+  warehouseId   String   @map("warehouse_id") @db.Uuid
+  day           DateTime @db.Date
+  picksCount    Int      @default(0) @map("picks_count")
+  receiptsCount Int      @default(0) @map("receipts_count")
+  shipmentsCount Int     @default(0) @map("shipments_count")
+  pickTimeSecSum Int     @default(0) @map("pick_time_sec_sum")
+  pickTimeSamples Int    @default(0) @map("pick_time_samples")
+  countVarianceAbs Int   @default(0) @map("count_variance_abs")
+  countUnits     Int     @default(0) @map("count_units")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([tenantId, warehouseId, day])
+  @@map("dashboard_kpis")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  userId    String?  @map("user_id") @db.Uuid
+  action    String
+  skuId     String?  @map("sku_id") @db.Uuid
+  payload   Json     @default("{}") @db.JsonB
+  ip        String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([tenantId, createdAt])
+  @@map("audit_logs")
+}
